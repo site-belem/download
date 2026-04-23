@@ -17,7 +17,7 @@ COOKIES_FILE = "cookies.txt"
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
 
-# --- SERVIDOR WEB FAKE (Para manter o Render vivo) ---
+# --- SERVIDOR WEB FAKE ---
 app = Flask(__name__)
 @app.route('/')
 def home(): return "Bot is running!"
@@ -30,16 +30,32 @@ threading.Thread(target=run_flask, daemon=True).start()
 
 # --- LÓGICA DE DOWNLOAD ---
 
+def clean_url(url):
+    """Limpa parâmetros de rastreamento do Instagram que causam timeout."""
+    if "instagram.com" in url:
+        # Remove tudo após a interrogação (parâmetros igsh, etc)
+        url = url.split('?')[0]
+        if not url.endswith('/'):
+            url += '/'
+    return url
+
 def get_ydl_opts(file_id, mode, url):
     output_template = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
+    
+    # User-agent mais 'humano' e variado para evitar bloqueio de IP
+    user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+    
     opts = {
         'outtmpl': output_template,
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'socket_timeout': 30,
-        'retries': 10,
+        'user_agent': user_agent,
+        'socket_timeout': 60, # Aumentado para evitar timeout no Instagram
+        'retries': 15,
+        'fragment_retries': 15,
+        # Tenta burlar o bloqueio de bot do YouTube usando clientes diferentes
+        'extractor_args': {'youtube': {'player_client': ['web', 'mweb', 'tv', 'ios']}},
     }
     
     if os.path.exists(COOKIES_FILE):
@@ -51,7 +67,8 @@ def get_ydl_opts(file_id, mode, url):
             'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
         })
     else:
-        opts['format'] = 'bestvideo+bestaudio/best'
+        # Formato mais flexível para evitar 'Requested format is not available'
+        opts['format'] = 'bestvideo+bestaudio/best/best'
     
     return opts
 
@@ -68,10 +85,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     if not re.match(r'https?://', url): return
     
+    # Limpa a URL antes de salvar
+    url = clean_url(url)
+    
     context.user_data['current_url'] = url
     keyboard = [[InlineKeyboardButton("🎬 Vídeo (MP4)", callback_data='video'),
                  InlineKeyboardButton("🎵 Áudio (MP3)", callback_data='audio')]]
-    await update.message.reply_text("O que você deseja baixar?", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(f"Link processado: {url}\nO que você deseja baixar?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -122,7 +142,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         error_msg = str(e)
         if "Sign in to confirm you're not a bot" in error_msg:
-            await status_msg.edit_text("❌ O YouTube bloqueou o acesso temporariamente. Tente novamente em alguns minutos.")
+            await status_msg.edit_text("❌ O YouTube bloqueou o IP do servidor. Tente novamente mais tarde ou use um link diferente.")
         else:
             await status_msg.edit_text(f"❌ Erro: {error_msg[:100]}")
 
