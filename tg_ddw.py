@@ -33,7 +33,6 @@ threading.Thread(target=run_flask, daemon=True).start()
 def clean_url(url):
     """Limpa parâmetros de rastreamento do Instagram que causam timeout."""
     if "instagram.com" in url:
-        # Remove tudo após a interrogação (parâmetros igsh, etc)
         url = url.split('?')[0]
         if not url.endswith('/'):
             url += '/'
@@ -41,8 +40,6 @@ def clean_url(url):
 
 def get_ydl_opts(file_id, mode, url):
     output_template = os.path.join(DOWNLOAD_DIR, f"{file_id}.%(ext)s")
-    
-    # User-agent mais 'humano' e variado para evitar bloqueio de IP
     user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
     
     opts = {
@@ -51,10 +48,9 @@ def get_ydl_opts(file_id, mode, url):
         'no_warnings': True,
         'nocheckcertificate': True,
         'user_agent': user_agent,
-        'socket_timeout': 60, # Aumentado para evitar timeout no Instagram
+        'socket_timeout': 60,
         'retries': 15,
         'fragment_retries': 15,
-        # Tenta burlar o bloqueio de bot do YouTube usando clientes diferentes
         'extractor_args': {'youtube': {'player_client': ['web', 'mweb', 'tv', 'ios']}},
     }
     
@@ -67,7 +63,6 @@ def get_ydl_opts(file_id, mode, url):
             'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
         })
     else:
-        # Formato mais flexível para evitar 'Requested format is not available'
         opts['format'] = 'bestvideo+bestaudio/best/best'
     
     return opts
@@ -85,20 +80,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     if not re.match(r'https?://', url): return
     
-    # Limpa a URL antes de salvar
     url = clean_url(url)
-    
     context.user_data['current_url'] = url
+    
     keyboard = [[InlineKeyboardButton("🎬 Vídeo (MP4)", callback_data='video'),
                  InlineKeyboardButton("🎵 Áudio (MP3)", callback_data='audio')]]
-    await update.message.reply_text(f"Link processado: {url}\nO que você deseja baixar?", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("O que você deseja baixar?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     if query.data == 'new_download':
-        await query.message.reply_text("Envie o novo link, mestre!")
+        await query.message.reply_text("Certo, mestre! Me envie o novo link.")
         return
 
     mode = query.data
@@ -142,9 +136,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         error_msg = str(e)
         if "Sign in to confirm you're not a bot" in error_msg:
-            await status_msg.edit_text("❌ O YouTube bloqueou o IP do servidor. Tente novamente mais tarde ou use um link diferente.")
+            await status_msg.edit_text("❌ O YouTube bloqueou o IP do servidor. Tente novamente mais tarde.")
         else:
-            await status_msg.edit_text(f"❌ Erro: {error_msg[:100]}")
+            await status_msg.edit_text(f"❌ Erro ao baixar o arquivo.")
+    
+    # Garante que o botão "Baixar outro" apareça sempre no final (sucesso ou erro)
+    keyboard = [[InlineKeyboardButton("🔄 Baixar outro", callback_data='new_download')]]
+    await query.message.reply_text("Deseja baixar mais alguma coisa?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 def main():
     while True:
