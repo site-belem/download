@@ -7,7 +7,7 @@ import time
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from telegram.error import Conflict
+from telegram.error import Conflict, TimedOut, NetworkError
 
 # --- CONFIGURAÇÕES DO BOT ---
 TOKEN = "8662880668:AAGv9KsQlDOyOdd3JvEUrpLsGKp7tUDaY1k"
@@ -48,7 +48,7 @@ def get_ydl_opts(file_id, mode, url):
         'no_warnings': True,
         'nocheckcertificate': True,
         'user_agent': user_agent,
-        'socket_timeout': 60,
+        'socket_timeout': 120, # Aumentado para evitar timeouts em conexões lentas
         'retries': 15,
         'fragment_retries': 15,
         'extractor_args': {'youtube': {'player_client': ['web', 'mweb', 'tv', 'ios']}},
@@ -63,7 +63,8 @@ def get_ydl_opts(file_id, mode, url):
             'postprocessors': [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}],
         })
     else:
-        opts['format'] = 'bestvideo+bestaudio/best/best'
+        # Prioriza formatos que já são mp4 para evitar conversões lentas no servidor
+        opts['format'] = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
     
     return opts
 
@@ -101,8 +102,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Erro: Link expirado. Envie novamente.")
         return
         
-    status_msg = await query.edit_message_text(f"⏳ Baixando {mode}... Isso pode levar um minuto.")
+    status_msg = await query.edit_message_text(f"⏳ Baixando {mode}... Isso pode levar um tempo dependendo do tamanho.")
     
+    file_path = None
     try:
         file_id = f"{query.from_user.id}_{int(time.time())}"
         ydl_opts = get_ydl_opts(file_id, mode, url)
@@ -112,42 +114,91 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 info = ydl.extract_info(url, download=True)
                 return ydl.prepare_filename(info)
 
+        # Download do arquivo
         file_path = await asyncio.get_event_loop().run_in_executor(None, run_ydl)
-        if mode == 'audio': file_path = os.path.splitext(file_path)[0] + ".mp3"
         
+        # Ajuste de extensão para áudio
+        if mode == 'audio':
+            base = os.path.splitext(file_path)[0]
+            if os.path.exists(base + ".mp3"):
+                file_path = base + ".mp3"
+        
+        # Verificação robusta do arquivo
         if not os.path.exists(file_path):
             base = os.path.splitext(file_path)[0]
-            for ext in ['.mp4', '.mkv', '.webm', '.3gp', '.mp3']:
+            for ext in ['.mp4', '.mkv', '.webm', '.3gp', '.mp3', '.m4a']:
                 if os.path.exists(base + ext):
                     file_path = base + ext
                     break
+        
+        if not os.path.exists(file_path):
+            raise Exception("Arquivo não encontrado após o download.")
             
-        await status_msg.edit_text("✅ Download concluído! Enviando...")
+        await status_msg.edit_text("✅ Download concluído! Enviando para o Telegram... (Aguarde)")
         
-        with open(file_path, 'rb') as f:
-            if mode == 'video':
-                await query.message.reply_video(video=f, caption="Aqui está!")
-            else:
-                await query.message.reply_audio(audio=f, caption="Aqui está!")
+        # Envio do arquivo com tratamento de timeout específico do Telegram
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with open(file_path, 'rb') as f:
+                    if mode == 'video':
+                        await query.message.reply_video(
+                            video=f, 
+                            caption="Aqui está seu vídeo!",
+                            read_timeout=300, 
+                            write_timeout=300, 
+                            connect_timeout=300, 
+                            pool_timeout=300
+                        )
+                    else:
+                        await query.message.reply_audio(
+                            audio=f, 
+                            caption="Aqui está seu áudio!",
+                            read_timeout=300, 
+                            write_timeout=300, 
+                            connect_timeout=300, 
+                            pool_timeout=300
+                        )
+                break # Sucesso no envio
+            except (TimedOut, NetworkError) as te:
+                if attempt == max_retries - 1:
+                    raise te
+                await asyncio.sleep(5) # Espera um pouco antes de tentar reenviar
         
-        if os.path.exists(file_path): os.remove(file_path)
         await status_msg.delete()
         
     except Exception as e:
-        error_msg = str(e)
-        if "Sign in to confirm you're not a bot" in error_msg:
+        error_msg = str(e).lower()
+        print(f"Erro no processamento: {e}")
+        
+        if "sign in to confirm you're not a bot" in error_msg:
             await status_msg.edit_text("❌ O YouTube bloqueou o IP do servidor. Tente novamente mais tarde.")
+        elif "timeout" in error_msg or "timed out" in error_msg:
+            await status_msg.edit_text("❌ O envio demorou demais, mas o arquivo pode ter sido enviado. Verifique seu chat.")
         else:
-            await status_msg.edit_text(f"❌ Erro ao baixar o arquivo.")
+            # Só exibe erro de download se o arquivo realmente não existir
+            if file_path and os.path.exists(file_path):
+                await status_msg.edit_text(f"❌ Erro ao enviar o arquivo para o Telegram.")
+            else:
+                await status_msg.edit_text(f"❌ Erro ao baixar o arquivo.")
     
-    # Garante que o botão "Baixar outro" apareça sempre no final (sucesso ou erro)
+    finally:
+        # Limpeza do arquivo
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except:
+                pass
+
+    # Garante que o botão "Baixar outro" apareça sempre no final
     keyboard = [[InlineKeyboardButton("🔄 Baixar outro", callback_data='new_download')]]
     await query.message.reply_text("Deseja baixar mais alguma coisa?", reply_markup=InlineKeyboardMarkup(keyboard))
 
 def main():
     while True:
         try:
-            application = Application.builder().token(TOKEN).build()
+            # Aumentar o timeout do Application para lidar com uploads longos
+            application = Application.builder().token(TOKEN).read_timeout(300).write_timeout(300).build()
             application.add_handler(CommandHandler("start", start))
             application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
             application.add_handler(CallbackQueryHandler(button_handler))
